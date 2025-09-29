@@ -1,0 +1,6 @@
+clickhouse_driver
+confluent-kafka
+fastavro
+orjson
+cachetools
+authlib

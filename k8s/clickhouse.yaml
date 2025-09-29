@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-credentials
+type: Opaque
+stringData:
+  admin: 9a83572fcd4d8606bd0298c5fdd9807d8e5a8b09ab67ac89f76d842fa38346f6 # plschangeme
+---
+# A corrected minimal viable, production-ready ClickHouse cluster
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: "clickhouse-prod-cluster"
+spec:
+  configuration:
+    clusters:
+      - name: "ch-cluster"
+        layout:
+          shardsCount: 1
+          replicasCount: 2
+    # This section correctly defines the user configuration
+    users:
+      admin:
+        password_sha256_hex:
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: admin
+        networks:
+          ips:
+            - 0.0.0.0/0
+        access_management: 1 # grants the user administrative privileges
+  # Templates section for customizing resources. This section is correctly placed under 'spec'.
+  templates:
+    # Pod template defines the ClickHouse container and its resources
+    podTemplates:
+      - name: "clickhouse-pod-template"
+        spec:
+          containers:
+            - name: "clickhouse"
+              image: "clickhouse/clickhouse-server:25.7.4-alpine" # Use a specific version for production
+              ports:
+                - name: http
+                  containerPort: 8123
+                - name: client
+                  containerPort: 9000
+                - name: interserver
+                  containerPort: 9009
+              resources:
+                requests:
+                  memory: 8Gi
+                  cpu: 2
+                limits:
+                  memory: 12Gi
+                  cpu: 4
+              volumeMounts:
+                - name: data-storage
+                  mountPath: /var/lib/clickhouse
+                - name: log-storage
+                  mountPath: /var/log/clickhouse-server
+    # Volume claim templates for persistent storage
+    volumeClaimTemplates:
+      - name: "data-storage"
+        spec:
+          accessModes:
+            - "ReadWriteOnce"
+          # This is the key for your OpenShift-local environment
+          storageClassName: "crc-csi-hostpath-provisioner"
+          resources:
+            requests:
+              storage: 50Gi
+      - name: "log-storage"
+        spec:
+          accessModes:
+            - "ReadWriteOnce"
+          storageClassName: "crc-csi-hostpath-provisioner"
+          resources:
+            requests:
+              storage: 10Gi
