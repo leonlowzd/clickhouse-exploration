@@ -34,4 +34,4 @@ You need the following installed on your system:
 
 ## 🔗 Accessing the Jupyterlab
 
-We can interface with clickhouse and kafka easily on [Jupyterlab]( http://localhost:8999). Open the notebook, ./notebooks/dem-setup.ipynb to run the demo.
+We can interface with clickhouse and kafka easily on [Jupyterlab]( http://localhost:8999). Open the notebook, `./notebooks/demo-setup.ipynb` to run the demo.
