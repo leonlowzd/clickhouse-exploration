@@ -8,8 +8,16 @@ Can reference the guide [here](https://clickhouse.com/docs/integrations/kafka/cl
 
 1. Installing the operator:
 
+For connected setup:
 ```bash
 curl -s https://raw.githubusercontent.com/Altinity/clickhouse-operator/master/deploy/operator-web-installer/clickhouse-operator-install.sh | OPERATOR_NAMESPACE=clickhouse-operator bash
+```
+
+For disconnected setup:
+```bash
+oc apply --namespace="starlake-clickhouse" -f <( cat "./clickhouse-operator-install-template.yaml" | \
+    OPERATOR_IMAGE="altinity/clickhouse-operator:latest" OPERATOR_NAMESPACE="starlake-clickhouse" METRICS_EXPORTER_IMAGE="altinity/metrics-exporter:latest" METRICS_EXPORTER_NAMESPACE="starlake-clickhouse" envsubst \
+)
 ```
 
 2. Installing a single-instance ClickHouse:
