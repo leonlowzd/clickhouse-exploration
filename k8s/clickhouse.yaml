@@ -5,6 +5,9 @@ metadata:
 type: Opaque
 stringData:
   admin: 9a83572fcd4d8606bd0298c5fdd9807d8e5a8b09ab67ac89f76d842fa38346f6 # plschangeme
+  # ?? NEW ACCOUNT HASHES (Example passwords: 'readerpass' and 'writerpass')
+  reader: 07d3257f86720d4f64700d1c81d8975a5e378f85f1c4e95d66649f807207604d # (Hash for 'readerpass')
+  writer: 032598c199d25514f7b60f1712a323af6c602078696144e1329c294025d2c208 # (Hash for 'writerpass')
 ---
 # A corrected minimal viable, production-ready ClickHouse cluster
 apiVersion: "clickhouse.altinity.com/v1"
@@ -18,18 +21,38 @@ spec:
         layout:
           shardsCount: 1
           replicasCount: 1
-    # This section correctly defines the user configuration
+        templates:
+          podTemplate: "clickhouse-pod-template"
+          volumeClaimTemplate: "data-storage"
+          logVolumeClaimTemplate: "log-storage" 
     users:
-      admin:
+      admin/password_sha256_hex:
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-credentials
+            key: admin
+      admin/networks/ips: ["0.0.0.0/0"]
+      admin/access_management: 1
+      writer:
         password_sha256_hex:
           valueFrom:
             secretKeyRef:
               name: clickhouse-credentials
-              key: admin
-        networks:
-          ips:
-            - 0.0.0.0/0
-        access_management: 1 # grants the user administrative privileges
+              key: writer
+      writer/profile: "writer_profile"
+      writer/networks/ips: ["0.0.0.0/0"]
+      reader:
+        password_sha256_hex:
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: reader
+      reader/profile: "reader_profile"
+      reader/networks/ips: ["0.0.0.0/0"]
+    # CRITICAL: Profiles must be defined if referenced above
+    profiles:
+      writer_profile/readonly: 0
+      reader_profile/readonly: 1
   # Templates section for customizing resources. This section is correctly placed under 'spec'.
   templates:
     # Pod template defines the ClickHouse container and its resources
