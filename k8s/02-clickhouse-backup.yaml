@@ -1,0 +1,267 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-backup-s3-credentials
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "CHANGE_ME"
+  AWS_SECRET_ACCESS_KEY: "CHANGE_ME"
+  AWS_DEFAULT_REGION: "us-east-1"
+  S3_BUCKET: "my-clickhouse-backups"
+  S3_PATH: "/" # Path prefix in the bucket
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-credentials
+type: Opaque
+stringData:
+  admin: 9a83572fcd4d8606bd0298c5fdd9807d8e5a8b09ab67ac89f76d842fa38346f6 # plschangeme
+  reader: 07d3257f86720d4f64700d1c81d8975a5e378f85f1c4e95d66649f807207604d # (Hash for 'readerpass')
+  writer: 032598c199d25514f7b60f1712a323af6c602078696144e1329c294025d2c208 # (Hash for 'writerpass')
+  # Plain password for backup tool (matches the 'admin' hash)
+  admin_plaintext: "plschangeme"
+---
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: "clickhouse-prod-cluster"
+spec:
+  configuration:
+    clusters:
+      - name: "ch-cluster"
+        layout:
+          shardsCount: 1
+          replicasCount: 1
+        templates:
+          podTemplate: "clickhouse-pod-template"
+          volumeClaimTemplate: "data-storage"
+          logVolumeClaimTemplate: "log-storage" 
+    users:
+      admin/password_sha256_hex:
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-credentials
+            key: admin
+      admin/networks/ips: ["0.0.0.0/0"]
+      admin/access_management: 1
+      writer:
+        password_sha256_hex:
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: writer
+      writer/profile: "writer_profile"
+      writer/networks/ips: ["0.0.0.0/0"]
+      reader:
+        password_sha256_hex:
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: reader
+      reader/profile: "reader_profile"
+      reader/networks/ips: ["0.0.0.0/0"]
+    # CRITICAL: Profiles must be defined if referenced above
+    profiles:
+      writer_profile/readonly: 0
+      reader_profile/readonly: 1
+  # Templates section for customizing resources. This section is correctly placed under 'spec'.
+  templates:
+    # Pod template defines the ClickHouse container and its resources
+    podTemplates:
+      - name: "clickhouse-pod-template"
+        spec:
+          containers:
+            - name: "clickhouse"
+              image: "clickhouse/clickhouse-server:25.7.4-alpine" # Use a specific version for production
+              ports:
+                - name: http
+                  containerPort: 8123
+                - name: client
+                  containerPort: 9000
+                - name: interserver
+                  containerPort: 9009
+              resources:
+                requests:
+                  memory: 8Gi
+                  cpu: 2
+                limits:
+                  memory: 12Gi
+                  cpu: 4
+              volumeMounts:
+                - name: data-storage
+                  mountPath: /var/lib/clickhouse
+                - name: log-storage
+                  mountPath: /var/log/clickhouse-server
+            - name: clickhouse-backup
+              image: altinity/clickhouse-backup:2.6.42
+              imagePullPolicy: IfNotPresent
+              ports:
+                - name: backup-rest
+                  containerPort: 7171
+              env:
+                - name: CLICKHOUSE_HOST
+                  value: "127.0.0.1" # Connect to the local CH instance
+                - name: CLICKHOUSE_PORT
+                  value: "9000"
+                - name: CLICKHOUSE_USER
+                  value: "admin" # Use the admin user from secret
+                - name: CLICKHOUSE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-credentials
+                      key: admin
+                - name: REMOTE_STORAGE
+                  value: "s3"
+                - name: S3_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-backup-s3-credentials
+                      key: S3_BUCKET
+                - name: S3_PATH
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-backup-s3-credentials
+                      key: S3_PATH
+                - name: S3_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-backup-s3-credentials
+                      key: AWS_DEFAULT_REGION
+                - name: S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-backup-s3-credentials
+                      key: AWS_ACCESS_KEY_ID
+                - name: S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-backup-s3-credentials
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: USE_EMBEDDED_BACKUP_RESTORE
+                  value: "true"
+              volumeMounts:
+                - name: data-storage
+                  mountPath: /var/lib/clickhouse
+    # Volume claim templates for persistent storage
+    volumeClaimTemplates:
+      - name: "data-storage"
+        spec:
+          accessModes:
+            - "ReadWriteOnce"
+          # This is the key for your OpenShift-local environment
+          storageClassName: "crc-csi-hostpath-provisioner"
+          resources:
+            requests:
+              storage: 50Gi
+      - name: "log-storage"
+        spec:
+          accessModes:
+            - "ReadWriteOnce"
+          storageClassName: "crc-csi-hostpath-provisioner"
+          resources:
+            requests:
+              storage: 10Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: clickhouse-backup-cron
+spec:
+  # every day at 00:00
+  schedule: "0 0 * * *"
+  concurrencyPolicy: "Forbid"
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      completions: 1
+      parallelism: 1
+      template:
+        metadata:
+          labels:
+            app: clickhouse-backup-cron
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: run-backup-cron
+              # https://hub.docker.com/r/clickhouse/clickhouse-client/tags, doesn't support arm64 platform
+              # `clickhouse-server` this is the same symlink with `clickhouse-client` to `clickhouse` binary 
+              image: clickhouse/clickhouse-server:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                # use first replica in each shard, use `kubectl get svc | grep test-backups`
+                - name: CLICKHOUSE_SERVICES
+                  value: chi-clickhouse-prod-cluster-ch-cluster-0-0
+                - name: CLICKHOUSE_PORT
+                  value: "9000"
+                - name: BACKUP_USER
+                  value: admin
+                - name: BACKUP_PASSWORD
+                  valueFrom: 
+                    secretKeyRef:
+                      name: clickhouse-credentials
+                      key: admin_plaintext
+                # change to 1, if you want to make full backup only in $FULL_BACKUP_WEEKDAY (1 - Mon, 7 - Sun)
+                - name: MAKE_INCREMENT_BACKUP
+                  value: "1"
+                - name: FULL_BACKUP_WEEKDAY
+                  value: "1"
+              command:
+                - bash
+                - -ec
+                - CLICKHOUSE_SERVICES=$(echo $CLICKHOUSE_SERVICES | tr "," " ");
+                  BACKUP_DATE=$(date +%Y-%m-%d-%H-%M-%S);
+                  declare -A BACKUP_NAMES;
+                  declare -A DIFF_FROM;
+                  if [[ "" != "$BACKUP_PASSWORD" ]]; then
+                  BACKUP_PASSWORD="--password=$BACKUP_PASSWORD";
+                  fi;
+                  for SERVER in $CLICKHOUSE_SERVICES; do
+                  if [[ "1" == "$MAKE_INCREMENT_BACKUP" ]]; then
+                  LAST_FULL_BACKUP=$(clickhouse-client -q "SELECT name FROM system.backup_list WHERE location='remote' AND name LIKE '%${SERVER}%' AND name LIKE '%full%' AND desc NOT LIKE 'broken%' ORDER BY created DESC LIMIT 1 FORMAT TabSeparatedRaw" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD);
+                  TODAY_FULL_BACKUP=$(clickhouse-client -q "SELECT name FROM system.backup_list WHERE location='remote' AND name LIKE '%${SERVER}%' AND name LIKE '%full%' AND desc NOT LIKE 'broken%' AND toDate(created) = today() ORDER BY created DESC LIMIT 1 FORMAT TabSeparatedRaw" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD)
+                  PREV_BACKUP_NAME=$(clickhouse-client -q "SELECT name FROM system.backup_list WHERE location='remote' AND desc NOT LIKE 'broken%' ORDER BY created DESC LIMIT 1 FORMAT TabSeparatedRaw" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD);
+                  DIFF_FROM[$SERVER]="";
+                  if [[ ("$FULL_BACKUP_WEEKDAY" == "$(date +%u)" && "" == "$TODAY_FULL_BACKUP") || "" == "$PREV_BACKUP_NAME" || "" == "$LAST_FULL_BACKUP" ]]; then
+                  BACKUP_NAMES[$SERVER]="full-$BACKUP_DATE";
+                  else
+                  BACKUP_NAMES[$SERVER]="increment-$BACKUP_DATE";
+                  DIFF_FROM[$SERVER]="--diff-from-remote=$PREV_BACKUP_NAME";
+                  fi
+                  else
+                  BACKUP_NAMES[$SERVER]="full-$BACKUP_DATE";
+                  fi;
+                  echo "set backup name on $SERVER = ${BACKUP_NAMES[$SERVER]}";
+                  done;
+                  for SERVER in $CLICKHOUSE_SERVICES; do
+                  echo "create ${BACKUP_NAMES[$SERVER]} on $SERVER";
+                  clickhouse-client --echo -mn -q "INSERT INTO system.backup_actions(command) VALUES('create ${SERVER}-${BACKUP_NAMES[$SERVER]}')" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD;
+                  done;
+                  for SERVER in $CLICKHOUSE_SERVICES; do
+                  while [[ "in progress" == $(clickhouse-client -mn -q "SELECT status FROM system.backup_actions WHERE command='create ${SERVER}-${BACKUP_NAMES[$SERVER]}' FORMAT TabSeparatedRaw" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD) ]]; do
+                  echo "still in progress ${BACKUP_NAMES[$SERVER]} on $SERVER";
+                  sleep 1;
+                  done;
+                  if [[ "success" != $(clickhouse-client -mn -q "SELECT status FROM system.backup_actions WHERE command='create ${SERVER}-${BACKUP_NAMES[$SERVER]}' FORMAT TabSeparatedRaw" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD) ]]; then
+                  echo "error create ${BACKUP_NAMES[$SERVER]} on $SERVER";
+                  clickhouse-client -mn --echo -q "SELECT status,error FROM system.backup_actions WHERE command='create ${SERVER}-${BACKUP_NAMES[$SERVER]}'" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD;
+                  exit 1;
+                  fi;
+                  done;
+                  for SERVER in $CLICKHOUSE_SERVICES; do
+                  echo "upload ${DIFF_FROM[$SERVER]} ${BACKUP_NAMES[$SERVER]} on $SERVER";
+                  clickhouse-client --echo -mn -q "INSERT INTO system.backup_actions(command) VALUES('upload ${DIFF_FROM[$SERVER]} ${SERVER}-${BACKUP_NAMES[$SERVER]}')" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD;
+                  done;
+                  for SERVER in $CLICKHOUSE_SERVICES; do
+                  while [[ "in progress" == $(clickhouse-client -mn -q "SELECT status FROM system.backup_actions WHERE command='upload ${DIFF_FROM[$SERVER]} ${SERVER}-${BACKUP_NAMES[$SERVER]}'" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD) ]]; do
+                  echo "upload still in progress ${BACKUP_NAMES[$SERVER]} on $SERVER";
+                  sleep 5;
+                  done;
+                  if [[ "success" != $(clickhouse-client -mn -q "SELECT status FROM system.backup_actions WHERE command='upload ${DIFF_FROM[$SERVER]} ${SERVER}-${BACKUP_NAMES[$SERVER]}'" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD) ]]; then
+                  echo "error ${BACKUP_NAMES[$SERVER]} on $SERVER";
+                  clickhouse-client -mn --echo -q "SELECT status,error FROM system.backup_actions WHERE command='upload ${DIFF_FROM[$SERVER]} ${SERVER}-${BACKUP_NAMES[$SERVER]}'" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD;
+                  exit 1;
+                  fi;
+                  clickhouse-client --echo -mn -q "INSERT INTO system.backup_actions(command) VALUES('delete local ${SERVER}-${BACKUP_NAMES[$SERVER]}')" --host="$SERVER" --port="$CLICKHOUSE_PORT" --user="$BACKUP_USER" $BACKUP_PASSWORD;
+                  done;
+                  echo "BACKUP CREATED"
