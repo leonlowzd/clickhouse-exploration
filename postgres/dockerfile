@@ -1,0 +1,111 @@
+FROM registry.redhat.io/rhel9/postgresql-16:9.6-1756967015 AS pg-base
+
+ARG POSTGRESQL_MAJOR_VERSION=16
+ARG WITH_POSTGIS=false
+ARG WITH_VECTOR=false
+ARG WITH_CLICKHOUSE=true
+
+# strips unecessary dependencies
+USER 0
+
+RUN  \
+    dnf remove -y \
+    vim-minimal \
+    vim-filesystem \
+    unzip \
+    tar \
+    rsync \
+    bsdtar \
+    ; \
+    dnf -qy module disable postgresql;
+
+RUN dnf -y upgrade
+
+# cis 2.1 - umask config
+RUN echo "umask 077" >> ~postgres/.bash_profile && \
+    echo "umask 077" >> /etc/profile && \
+    echo "umask 077" >> /etc/bashrc
+
+# the commented part is to install the CIS audit tooling, but not needed when deploying
+# RUN \
+# 	dnf install -y perl-devel perl-bignum perl-Math-BigRat git && \
+# 	git clone https://github.com/HexaCluster/pgdsat && \
+# 	cd pgdsat && \
+# 	perl Makefile.PL && \
+# 	make && \
+# 	make install && \
+# 	chmod +x pgdsat && \
+# 	mv pgdsat /usr/bin/ && \
+# 	cd .. && \
+# 	rm -r pgdsat
+
+# centos repos because postgis is not supported under ubi
+# https://access.redhat.com/solutions/7102948
+RUN if [ "$WITH_POSTGIS" = "true" ]; then \
+    dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs install \
+    https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-9.0-28.el9.noarch.rpm \
+    https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-9.0-28.el9.noarch.rpm \
+    https://dl.fedoraproject.org/pub/epel/epel{,-next}-release-latest-9.noarch.rpm; \
+    dnf install -y https://mirror.stream.centos.org/9-stream/CRB/x86_64/os/Packages/libqhull_r-7.2.1-11.el9.x86_64.rpm; \
+    dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm; \	
+    dnf install -y "postgis35_${POSTGRESQL_MAJOR_VERSION}"; \
+    dnf remove -y pgdg-redhat-repo centos-stream-repos epel{,-next}-release; \
+    fi
+
+RUN if [ "$WITH_VECTOR" = "true" ]; then \
+    dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm; \	
+    dnf install -y "pgvector_${POSTGRESQL_MAJOR_VERSION}"; \
+    dnf remove -y pgdg-redhat-repo centos-stream-repos epel{,-next}-release; \
+    fi
+
+RUN if [ "$WITH_CLICKHOUSE" = "true" ]; then \
+    dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs install \
+    https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-9.0-28.el9.noarch.rpm \
+    https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-9.0-28.el9.noarch.rpm \
+    https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
+    https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm && \
+    dnf install -y --enablerepo=crb \
+    "postgresql${POSTGRESQL_MAJOR_VERSION}-devel" \
+    "postgresql${POSTGRESQL_MAJOR_VERSION}-llvmjit" \
+    git make cmake gcc-c++ redhat-rpm-config \
+    libcurl-devel libuuid-devel openssl-devel llvm llvm-devel clang clang-devel && \
+    if [ ! -d "/usr/lib64/llvm20" ]; then ln -s /usr /usr/lib64/llvm20; fi && \
+    git clone https://github.com/ClickHouse/pg_clickhouse.git /build/pg_clickhouse && \
+    cd /build/pg_clickhouse && \
+    export PG_CONFIG=/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/bin/pg_config && \
+    make && \
+    make install DESTDIR=/dest && \
+    cp -R /dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/* /usr/lib64/pgsql/ && \
+    cp -R /dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/share/extension/* /usr/share/pgsql/extension/ && \
+    if [ -d "/dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/bitcode" ]; then \
+    cp -R /dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/bitcode /usr/lib64/pgsql/; \
+    fi && \
+    rm -rf /build /dest && \
+    dnf remove -y \
+    "postgresql${POSTGRESQL_MAJOR_VERSION}-devel" \
+    "postgresql${POSTGRESQL_MAJOR_VERSION}-llvmjit" \
+    git make cmake gcc-c++ redhat-rpm-config \
+    libcurl-devel libuuid-devel openssl-devel llvm llvm-devel clang clang-devel \
+    pgdg-redhat-repo centos-stream-repos epel-release && \
+    dnf clean all; \
+    fi
+
+RUN \
+    cp -R /usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/bin/ /usr/share/pgsql/; \
+    cp -R /usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/* /usr/lib64/pgsql/; \
+    cp /usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/share/extension/* -R /usr/share/pgsql/extension/; \
+    cp -R /dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/* /usr/lib64/pgsql/; \
+    cp -R /dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/share/extension/* /usr/share/pgsql/extension/; \
+    if [ -d "/dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/bitcode" ]; then \
+    cp -R /dest/usr/pgsql-${POSTGRESQL_MAJOR_VERSION}/lib/bitcode /usr/lib64/pgsql/; \
+    fi; \
+    usermod -u 26 postgres
+
+FROM pg-base as pg-release
+
+# strips unecessary dependencies
+USER 0
+
+RUN rpm -e --nodeps dnf dnf-data python3-dnf libdnf
+
+USER 26
